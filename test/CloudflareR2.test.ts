@@ -1,248 +1,202 @@
 /* Copyright © 2024 Seneca Project Contributors, MIT License. */
 
-require('dotenv').config({ path: '.env.local' })
-// console.log(process.env) // remove this
-
+import Os from 'os'
+import Path from 'path'
+import Fsp from 'fs/promises'
 
 import Seneca from 'seneca'
-// import SenecaMsgTest from 'seneca-msg-test'
-// import { Maintain } from '@seneca/maintain'
+import { Miniflare } from 'miniflare'
 
-import OpensearchStoreDoc from '../src/OpensearchStoreDoc'
-import OpensearchStore from '../src/OpensearchStore'
+import CloudflareR2StoreDoc from '../src/CloudflareR2StoreDoc'
+import CloudflareR2Store from '../src/CloudflareR2Store'
 
-
-
-describe('OpensearchStore', () => {
+describe('CloudflareR2Store', () => {
   test('load-plugin', async () => {
-    expect(OpensearchStore).toBeDefined()
-    expect(OpensearchStoreDoc).toBeDefined()
+    expect(CloudflareR2Store).toBeDefined()
+    expect(CloudflareR2StoreDoc).toBeDefined()
+
+    const folder = await tmpFolder()
 
     const seneca = Seneca({ legacy: false })
       .test()
       .use('promisify')
       .use('entity')
-      .use(OpensearchStore)
+      .use(CloudflareR2Store, { local: { active: true, folder } })
+
     await seneca.ready()
 
-    expect(seneca.export('OpensearchStore/native')).toBeDefined()
+    expect(seneca.export('CloudflareR2Store/native')).toBeDefined()
+
+    await Fsp.rm(folder, { recursive: true, force: true })
   })
 
+  test('utils.makeR2Key', () => {
+    const { makeR2Key } = CloudflareR2Store['utils']
 
-  test('utils.resolveIndex', () => {
-    const utils = OpensearchStore['utils']
-    const resolveIndex = utils.resolveIndex
-    const seneca = makeSeneca()
+    const seneca = Seneca({ legacy: false }).test().use('entity')
     const ent0 = seneca.make('foo')
     const ent1 = seneca.make('foo/bar')
 
-    expect(resolveIndex(ent0, { index: {} })).toEqual('foo')
-    expect(resolveIndex(ent0, { index: { exact: 'qaz' } })).toEqual('qaz')
+    expect(
+      makeR2Key('i0', ent0, { prefix: 'seneca/r2/', suffix: '.json' }, false),
+    ).toEqual('seneca/r2/-/-/foo/i0.json')
 
-    expect(resolveIndex(ent1, { index: {} })).toEqual('foo_bar')
-    expect(resolveIndex(ent1, { index: { prefix: 'p0', suffix: 's0' } })).toEqual('p0_foo_bar_s0')
-    expect(resolveIndex(ent1, {
-      index: { map: { '-/foo/bar': 'FOOBAR' }, prefix: 'p0', suffix: 's0' }
-    }))
-      .toEqual('FOOBAR')
-  }, 22222)
+    expect(
+      makeR2Key('i0', ent1, { prefix: 'seneca/r2/', suffix: '.json' }, false),
+    ).toEqual('seneca/r2/-/foo/bar/i0.json')
 
+    expect(
+      makeR2Key('i0', ent1, { folder: 'mybucket', suffix: '.json' }, false),
+    ).toEqual('mybucket/i0.json')
 
-  test('insert-remove', async () => {
-    const seneca = await makeSeneca()
-    await seneca.ready()
+    expect(
+      makeR2Key('i0', ent1, { prefix: 'seneca/r2/', suffix: '' }, true),
+    ).toEqual('seneca/r2/-/foo/bar/i0')
+  })
 
+  describe('local-folder', () => {
+    let folder: string
+    let seneca: any
 
-    // no query params means no results
-    const list0 = await seneca.entity('foo/chunk').list$()
-    expect(0 === list0.length)
+    beforeAll(async () => {
+      folder = await tmpFolder()
 
-    const list1 = await seneca.entity('foo/chunk').list$({ test: 'insert-remove' })
-    // console.log(list1)
+      seneca = Seneca({ legacy: false })
+        .test()
+        .use('promisify')
+        .use('entity')
+        .use(CloudflareR2Store, { local: { active: true, folder } })
 
-    let ent0: any
-
-    if (0 === list1.length) {
-      ent0 = await seneca.entity('foo/chunk')
-        .make$()
-        .data$({
-          test: 'insert-remove',
-          text: 't01',
-          vector: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7],
-          directive$: { vector$: true },
-        })
-        .save$()
-      expect(ent0).toMatchObject({ test: 'insert-remove' })
-      await new Promise((r) => setTimeout(r, 2222))
-    }
-    else {
-      ent0 = list1[0]
-    }
-
-    await seneca.entity('foo/chunk').remove$(ent0.id)
-
-    await new Promise((r) => setTimeout(r, 2222))
-
-    const list2 = await seneca.entity('foo/chunk').list$({ test: 'insert-remove' })
-    // console.log(list2)
-    expect(list2.filter((n: any) => n.id === ent0.id)).toEqual([])
-  }, 22222)
-
-
-  test('vector-cat', async () => {
-    const seneca = await makeSeneca()
-    await seneca.ready()
-
-    // const list0 = await seneca.entity('foo/chunk').list$({ test: 'vector-cat' })
-    // console.log('list0', list0)
-
-    // NOT AVAILABLE ON AWS
-    // await seneca.entity('foo/chunk').remove$({ all$: true, test: 'vector-cat' })
-
-    const list1 = await seneca.entity('foo/chunk').list$({ test: 'vector-cat' })
-    // console.log('list1', list1)
-
-    /*
-    for (let i = 0; i < list1.length; i++) {
-      await list1[i].remove$()
-    }
-
-    await new Promise((r) => setTimeout(r, 2222))
-
-    const list1r = await seneca.entity('foo/chunk').list$({ test: 'vector-cat' })
-    // console.log('list1r', list1r)
-    */
-
-    if (!list1.find((n: any) => 'code0' === n.code)) {
-      await seneca.entity('foo/chunk')
-        .make$()
-        .data$({
-          code: 'code0',
-          test: 'vector-cat',
-          text: 't01',
-          vector: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1],
-          directive$: { vector$: true },
-        })
-        .save$()
-    }
-
-    if (!list1.find((n: any) => 'code1' === n.code)) {
-      await seneca.entity('foo/chunk')
-        .make$()
-        .data$({
-          code: 'code1',
-          test: 'vector-cat',
-          text: 't01',
-          vector: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1],
-          directive$: { vector$: true },
-        })
-        .save$()
-    }
-
-    await new Promise((r) => setTimeout(r, 2222))
-
-    const list2 = await seneca.entity('foo/chunk').list$({
-      directive$: { vector$: { k: 2 } },
-      vector: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1],
+      await seneca.ready()
     })
-    // console.log('list2', list2.map((n: any) => ({ ...n })))
-    expect(1 < list2.length).toEqual(true)
 
-    const list3 = await seneca.entity('foo/chunk').list$({
-      directive$: { vector$: { k: 2 } },
-      vector: [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1],
-      code: 'code0'
+    afterAll(async () => {
+      await Fsp.rm(folder, { recursive: true, force: true })
     })
-    // console.log('list3', list3.map((n: any) => ({ ...n })))
-    expect(list3.length).toEqual(1)
 
-  }, 22222)
+    test('save and load by id', async () => {
+      const ent = await seneca
+        .entity('foo/bar')
+        .data$({ x: 1, y: 'hello' })
+        .save$()
 
+      expect(ent.id).toBeDefined()
+      expect(ent).toMatchObject({ x: 1, y: 'hello' })
 
+      const loaded = await seneca.entity('foo/bar').load$(ent.id)
+      expect(loaded).toMatchObject({ id: ent.id, x: 1, y: 'hello' })
+    })
 
+    test('load missing returns null', async () => {
+      const loaded = await seneca.entity('foo/bar').load$('not-an-id')
+      expect(loaded).toEqual(null)
+    })
+
+    test('list returns empty array', async () => {
+      const list = await seneca.entity('foo/bar').list$({})
+      expect(list).toEqual([])
+    })
+
+    test('remove by id', async () => {
+      const ent = await seneca
+        .entity('foo/bar')
+        .data$({ x: 99 })
+        .save$()
+
+      await seneca.entity('foo/bar').remove$(ent.id)
+
+      const loaded = await seneca.entity('foo/bar').load$(ent.id)
+      expect(loaded).toEqual(null)
+    })
+
+    test('save and load jsonl field', async () => {
+      const ent = await seneca
+        .entity('foo/chunk')
+        .data$({
+          chunks: [{ text: 'a' }, { text: 'b' }],
+        })
+        .save$({ jsonl$: 'chunks' })
+
+      const loaded = await seneca
+        .entity('foo/chunk')
+        .load$({ id: ent.id, jsonl$: 'chunks' })
+
+      expect(loaded.chunks).toEqual([{ text: 'a' }, { text: 'b' }])
+    })
+
+    test('save and load binary field', async () => {
+      const buf = Buffer.from([0x01, 0x02, 0x03])
+
+      const ent = await seneca
+        .entity('foo/bin')
+        .data$({ data: buf })
+        .save$({ bin$: 'data' })
+
+      const loaded = await seneca
+        .entity('foo/bin')
+        .load$({ id: ent.id, bin$: 'data' })
+
+      expect(Buffer.from(loaded.data)).toEqual(buf)
+    })
+  })
+
+  describe('r2-binding', () => {
+    let mf: Miniflare
+    let seneca: any
+
+    beforeAll(async () => {
+      mf = new Miniflare({
+        modules: true,
+        script: 'export default { fetch() { return new Response("ok") } }',
+        r2Buckets: ['TEST_R2'],
+      })
+
+      const binding = await mf.getR2Bucket('TEST_R2')
+
+      seneca = Seneca({ legacy: false })
+        .test()
+        .use('promisify')
+        .use('entity')
+        .use(CloudflareR2Store, { r2: { binding } })
+
+      await seneca.ready()
+    })
+
+    afterAll(async () => {
+      await mf.dispose()
+    })
+
+    test('save and load by id', async () => {
+      const ent = await seneca
+        .entity('foo/bar')
+        .data$({ x: 2, y: 'world' })
+        .save$()
+
+      expect(ent.id).toBeDefined()
+
+      const loaded = await seneca.entity('foo/bar').load$(ent.id)
+      expect(loaded).toMatchObject({ id: ent.id, x: 2, y: 'world' })
+    })
+
+    test('load missing returns null', async () => {
+      const loaded = await seneca.entity('foo/bar').load$('no-such-id')
+      expect(loaded).toEqual(null)
+    })
+
+    test('remove by id', async () => {
+      const ent = await seneca
+        .entity('foo/bar')
+        .data$({ x: 42 })
+        .save$()
+
+      await seneca.entity('foo/bar').remove$(ent.id)
+
+      const loaded = await seneca.entity('foo/bar').load$(ent.id)
+      expect(loaded).toEqual(null)
+    })
+  })
 })
 
-
-function makeSeneca() {
-  return Seneca({ legacy: false })
-    .test()
-    .use('promisify')
-    .use('entity')
-    .use(OpensearchStore, {
-      map: {
-        'foo/chunk': '*'
-      },
-      index: {
-        exact: process.env.SENECA_OPENSEARCH_TEST_INDEX,
-      },
-      opensearch: {
-        node: process.env.SENECA_OPENSEARCH_TEST_NODE,
-      }
-    })
+async function tmpFolder() {
+  return Fsp.mkdtemp(Path.join(Os.tmpdir(), 'seneca-r2-test-'))
 }
-
-
-const index_test01 = {
-  "mappings": {
-    "properties": {
-      "text": { "type": "text" },
-      "vector": {
-        "type": "knn_vector",
-        "dimension": 8, // 1536,
-        "method": {
-          "engine": "nmslib",
-          "space_type": "cosinesimil",
-          "name": "hnsw",
-          "parameters": { "ef_construction": 512, "m": 16 }
-        }
-      }
-    }
-  },
-  "settings": {
-    "index": {
-      "number_of_shards": 2,
-      "knn.algo_param": { "ef_search": 512 },
-      "knn": true
-    }
-  }
-}
-
-
-/*
-  [
-  {
-    "Rules": [
-      {
-        "Resource": [
-          "collection/podmind03a"
-        ],
-        "Permission": [
-          "aoss:CreateCollectionItems",
-          "aoss:DeleteCollectionItems",
-          "aoss:UpdateCollectionItems",
-          "aoss:DescribeCollectionItems"
-        ],
-        "ResourceType": "collection"
-      },
-      {
-        "Resource": [
-          "index/podmind03a/*"
-        ],
-        "Permission": [
-          "aoss:CreateIndex",
-          "aoss:DeleteIndex",
-          "aoss:UpdateIndex",
-          "aoss:DescribeIndex",
-          "aoss:ReadDocument",
-          "aoss:WriteDocument"
-        ],
-        "ResourceType": "index"
-      }
-    ],
-    "Principal": [
-      "arn:aws:iam::...:role/...LambdaRole..."
-    ],
-    "Description": "Easy data policy"
-  }
-]
-  */

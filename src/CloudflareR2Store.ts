@@ -1,207 +1,170 @@
 /* Copyright (c) 2024 Seneca contributors, MIT License */
 
-import { AwsSigv4Signer } from '@opensearch-project/opensearch/aws'
-import { Client } from '@opensearch-project/opensearch'
-import { defaultProvider } from '@aws-sdk/credential-provider-node'
+import Path from 'path'
+import Fsp from 'fs/promises'
+
+import {
+  S3Client,
+  PutObjectCommand,
+  GetObjectCommand,
+  DeleteObjectCommand,
+} from '@aws-sdk/client-s3'
 
 import { Gubu } from 'gubu'
 
-const { Open, Any } = Gubu
+const { Open, Any, Skip, Empty, Default, Exact, Child } = Gubu
+
+type R2Config = {
+  accountId: string
+  accessKeyId: string
+  secretAccessKey: string
+}
 
 type Options = {
   debug: boolean
+  prefix: any
+  suffix: any
+  folder: any
   map?: any
-  index: {
-    prefix: string
-    suffix: string
-    map: Record<string, string>
-    exact: string
-  }
-  field: {
-    zone: { name: string }
-    base: { name: string }
-    name: { name: string }
-    vector: { name: string }
-  }
-  cmd: {
-    list: {
-      size: number
-    }
-  }
-  aws: any
-  opensearch: any
+  shared: any
+  generate_id?: (ent: any) => string
+  local: any
+  ent: any
+  r2: any
+  s3: any
 }
 
-export type OpensearchStoreOptions = Partial<Options>
+export type CloudflareR2StoreOptions = Partial<Options>
 
-function OpensearchStore(this: any, options: Options) {
+// Internal client abstraction — satisfied by S3Client wrapper,
+// R2Bucket binding adapter, or local-folder implementation.
+type StorageClient = {
+  put(key: string, body: Buffer): Promise<void>
+  get(key: string): Promise<Buffer | null>
+  remove(key: string): Promise<void>
+}
+
+function CloudflareR2Store(this: any, options: Options) {
   const seneca: any = this
 
   const init = seneca.export('entity/init')
+  const generate_id: (ent: any) => string =
+    options.generate_id || seneca.export('entity/generate_id')
 
-  let desc: any = 'OpensearchStore'
-
-  let client: any
+  let desc: any = 'CloudflareR2Store'
+  let client: StorageClient
 
   let store = {
-    name: 'OpensearchStore',
+    name: 'CloudflareR2Store',
 
-    save: function (this: any, msg: any, reply: any) {
-      // const seneca = this
+    save: async function (this: any, msg: any, reply: any) {
       const ent = msg.ent
+      const canon = ent.entity$
+      const id = '' + (ent.id || ent.id$ || generate_id(ent))
+      const d = ent.data$()
+      d.id = id
 
-      const canon = ent.canon$({ object: true })
-      const index = resolveIndex(ent, options)
+      const entSpec = options.ent[canon]
+      const jsonl = entSpec?.jsonl || msg.jsonl$ || msg.q?.jsonl$
+      const bin = entSpec?.bin || msg.bin$ || msg.q?.bin$
+      const key = makeR2Key(id, ent, options, !!bin)
 
-      const body = ent.data$(false)
+      let body: Buffer
 
-      const fieldOpts: any = options.field
-
-      ;['zone', 'base', 'name'].forEach((n: string) => {
-        if ('' != fieldOpts[n].name && null != canon[n] && '' != canon[n]) {
-          body[fieldOpts[n].name] = canon[n]
+      if ('string' === typeof jsonl && '' !== jsonl) {
+        const arr = ent[jsonl]
+        if (!Array.isArray(arr)) {
+          return reply(
+            new Error('CloudflareR2Store: jsonl field not an array: ' + jsonl),
+          )
         }
-      })
-
-      const req = {
-        index,
-        body,
-      }
-
-      client
-        .index(req)
-        .then((res: any) => {
-          const body = res.body
-          ent.data$(body._source)
-          ent.id = body._id
-          reply(ent)
-        })
-        .catch((err: any) => reply(err))
-    },
-
-    load: function (this: any, msg: any, reply: any) {
-      // const seneca = this
-      const ent = msg.ent
-
-      // const canon = ent.canon$({ object: true })
-      const index = resolveIndex(ent, options)
-
-      let q = msg.q || {}
-
-      if (null != q.id) {
-        client
-          .get({
-            index,
-            id: q.id,
-          })
-          .then((res: any) => {
-            const body = res.body
-            ent.data$(body._source)
-            ent.id = body._id
-            reply(ent)
-          })
-          .catch((err: any) => {
-            // Not found
-            if (err.meta && 404 === err.meta.statusCode) {
-              reply(null)
-            }
-
-            reply(err)
-          })
+        body = Buffer.from(
+          arr.map((n: any) => JSON.stringify(n)).join('\n') + '\n',
+        )
+      } else if ('string' === typeof bin && '' !== bin) {
+        let data = ent[bin]
+        if (null == data) {
+          return reply(
+            new Error('CloudflareR2Store: bin field not found: ' + bin),
+          )
+        }
+        if ('function' === typeof data) {
+          data = data()
+        }
+        body = Buffer.from(data)
       } else {
-        reply()
+        body = Buffer.from(JSON.stringify(d))
+      }
+
+      try {
+        await client.put(key, body)
+        const ento = ent.make$().data$(d)
+        reply(null, ento)
+      } catch (err: any) {
+        reply(err)
       }
     },
 
-    list: function (msg: any, reply: any) {
-      // const seneca = this
-      const ent = msg.ent
+    load: async function (this: any, msg: any, reply: any) {
+      const qent = msg.qent
+      const canon = qent.entity$
+      const id = '' + msg.q.id
+      const entSpec = options.ent[canon]
+      const jsonl = entSpec?.jsonl || msg.jsonl$ || msg.q?.jsonl$
+      const bin = entSpec?.bin || msg.bin$ || msg.q?.bin$
+      const key = makeR2Key(id, qent, options, !!bin)
 
-      const index = resolveIndex(ent, options)
-      const query = buildQuery({ index, options, msg })
+      const output: 'ent' | 'jsonl' | 'bin' =
+        jsonl && '' !== jsonl ? 'jsonl' : bin && '' !== bin ? 'bin' : 'ent'
 
-      // console.log('LISTQ')
-      // console.dir(query, { depth: null })
+      try {
+        const raw = await client.get(key)
 
-      if (null == query) {
-        return reply([])
-      }
-
-      client
-        .search(query)
-        .then((res: any) => {
-          const hits = res.body.hits
-          const list = hits.hits.map((entry: any) => {
-            let item = ent.make$().data$(entry._source)
-            item.id = entry._id
-            item.custom$ = { score: entry._score }
-            return item
-          })
-          reply(list)
-        })
-        .catch((err: any) => {
-          reply(err)
-        })
-    },
-
-    // NOTE: all$:true is REQUIRED for deleteByQuery
-    remove: function (this: any, msg: any, reply: any) {
-      // const seneca = this
-      const ent = msg.ent
-
-      const index = resolveIndex(ent, options)
-
-      const q = msg.q || {}
-      let id = q.id
-      let query
-
-      if (null == id) {
-        query = buildQuery({ index, options, msg })
-
-        if (null == query || true !== q.all$) {
+        if (null == raw) {
           return reply(null)
         }
+
+        let entdata: any = {}
+
+        if ('jsonl' === output) {
+          entdata[jsonl] = raw
+            .toString('utf-8')
+            .split('\n')
+            .filter((n: string) => '' !== n)
+            .map((n: string) => JSON.parse(n))
+        } else if ('bin' === output) {
+          entdata[bin] = raw
+        } else {
+          entdata = JSON.parse(raw.toString('utf-8'))
+        }
+
+        entdata.id = id
+        const ento = qent.make$().data$(entdata)
+        reply(null, ento)
+      } catch (err: any) {
+        reply(err)
       }
+    },
 
-      // console.log('REMOVE', id)
-      // console.dir(query, { depth: null })
+    // NOTE: R2/S3 stores are id-addressed. Field-based querying is not
+    // supported; use Cloudflare D1 if you need list$ with filtering.
+    list: function (this: any, _msg: any, reply: any) {
+      reply(null, [])
+    },
 
-      if (null != id) {
-        client
-          .delete({
-            index,
-            id,
-            // refresh: true,
-          })
-          .then((_res: any) => {
-            reply(null)
-          })
-          .catch((err: any) => {
-            // Not found
-            if (err.meta && 404 === err.meta.statusCode) {
-              return reply(null)
-            }
+    remove: async function (this: any, msg: any, reply: any) {
+      const qent = msg.qent
+      const canon = qent.entity$
+      const id = '' + msg.q.id
+      const entSpec = options.ent[canon]
+      const bin = entSpec?.bin || msg.bin$ || msg.q?.bin$
+      const key = makeR2Key(id, qent, options, !!bin)
 
-            reply(err)
-          })
-      } else if (null != query && true === q.all$) {
-        client
-          .deleteByQuery({
-            index,
-            body: {
-              query,
-            },
-            // refresh: true,
-          })
-          .then((_res: any) => {
-            reply(null)
-          })
-          .catch((err: any) => {
-            // console.log('REM ERR', err)
-            reply(err)
-          })
-      } else {
-        reply(null)
+      try {
+        await client.remove(key)
+        reply()
+      } catch (err: any) {
+        reply(err)
       }
     },
 
@@ -210,11 +173,8 @@ function OpensearchStore(this: any, options: Options) {
       reply()
     },
 
-    // TODO: obsolete - remove from seneca entity
     native: function (this: any, _msg: any, reply: any) {
-      reply(null, {
-        client: () => client,
-      })
+      reply(null, { client: () => client })
     },
   }
 
@@ -222,157 +182,193 @@ function OpensearchStore(this: any, options: Options) {
 
   desc = meta.desc
 
-  seneca.prepare(async function (this: any) {
-    const region = options.aws.region
-    const node = options.opensearch.node
-
-    client = new Client({
-      ...AwsSigv4Signer({
-        region,
-        service: 'aoss',
-        getCredentials: () => {
-          const credentialsProvider = defaultProvider()
-          return credentialsProvider()
-        },
-      }),
-      node,
-    })
+  seneca.add({ init: store.name, tag: meta.tag }, function (this: any, _msg: any, reply: any) {
+    if (options.r2?.binding) {
+      client = makeBindingClient(options.r2.binding)
+    } else if (options.local?.active) {
+      client = makeLocalClient(options.local.folder)
+    } else {
+      client = makeS3Client(options)
+    }
+    reply()
   })
 
   return {
     name: store.name,
     tag: meta.tag,
-    exportmap: {
-      native: () => {
-        return { client }
-      },
+    exports: {
+      native: () => ({ client }),
     },
   }
 }
 
-function buildQuery(spec: { index: string; options: any; msg: any }) {
-  const { index, options, msg } = spec
+// Builds an R2/S3 object key from an entity canon and id.
+function makeR2Key(
+  id: string,
+  ent: any,
+  options: Options,
+  bin: boolean,
+): string {
+  const suffix = bin ? '' : options.suffix
 
-  const q = msg.q || {}
+  if (null != options.folder && '' !== options.folder) {
+    return options.folder + '/' + id + suffix
+  }
 
-  let query: any = {
-    index,
-    body: {
-      size: msg.size$ || options.cmd.list.size,
-      _source: {
-        excludes: [options.field.vector.name].filter((n) => '' !== n),
-      },
-      query: {},
+  return options.prefix + ent.entity$ + '/' + id + suffix
+}
+
+// Adapter for a Cloudflare R2Bucket Workers binding.
+function makeBindingClient(binding: any): StorageClient {
+  return {
+    async put(key, body) {
+      await binding.put(key, body)
+    },
+
+    async get(key) {
+      const obj = await binding.get(key)
+      if (null == obj) {
+        return null
+      }
+      return Buffer.from(await obj.arrayBuffer())
+    },
+
+    async remove(key) {
+      await binding.delete(key)
     },
   }
-
-  let excludeKeys: any = { vector: 1 }
-
-  const parts = []
-
-  for (let k in q) {
-    if (!excludeKeys[k] && !k.match(/\$/)) {
-      parts.push({
-        match: { [k]: q[k] },
-      })
-    }
-  }
-
-  const vector$ = msg.vector$ || q.directive$?.vector$
-  if (vector$) {
-    parts.push({
-      knn: {
-        vector: {
-          vector: q.vector,
-          k: null == vector$.k ? 11 : vector$.k,
-        },
-      },
-    })
-  }
-
-  if (0 === parts.length) {
-    query = null
-  } else if (1 === parts.length) {
-    query.body.query = parts[0]
-  } else {
-    query.body.query = {
-      bool: {
-        must: parts,
-      },
-    }
-  }
-
-  return query
 }
 
-function resolveIndex(ent: any, options: Options) {
-  let indexOpts = options.index
-  if ('' != indexOpts.exact && null != indexOpts.exact) {
-    return indexOpts.exact
+// Client backed by the Cloudflare R2 S3-compatible API via AWS SDK.
+function makeS3Client(options: Options): StorageClient {
+  const r2 = (options.r2 || {}) as R2Config
+  const endpoint = `https://${r2.accountId}.r2.cloudflarestorage.com`
+
+  const s3 = new S3Client({
+    endpoint,
+    region: 'auto',
+    credentials: {
+      accessKeyId: r2.accessKeyId,
+      secretAccessKey: r2.secretAccessKey,
+    },
+    ...options.s3,
+  })
+
+  const shared = { Bucket: '!not-a-bucket!', ...options.shared }
+
+  return {
+    async put(key, body) {
+      await s3.send(
+        new PutObjectCommand({ ...shared, Key: key, Body: body }),
+      )
+    },
+
+    async get(key) {
+      try {
+        const res = await s3.send(
+          new GetObjectCommand({ ...shared, Key: key }),
+        )
+        return destreamToBuffer(res.Body)
+      } catch (err: any) {
+        if ('NoSuchKey' === err.Code || 'NoSuchKey' === err.name) {
+          return null
+        }
+        throw err
+      }
+    },
+
+    async remove(key) {
+      try {
+        await s3.send(
+          new DeleteObjectCommand({ ...shared, Key: key }),
+        )
+      } catch (err: any) {
+        if ('NoSuchKey' === err.Code || 'NoSuchKey' === err.name) {
+          return
+        }
+        throw err
+      }
+    },
   }
-
-  let canonstr = ent.canon$({ string: true })
-  indexOpts.map = indexOpts.map || {}
-  if ('' != indexOpts.map[canonstr] && null != indexOpts.map[canonstr]) {
-    return indexOpts.map[canonstr]
-  }
-
-  let prefix = indexOpts.prefix
-  let suffix = indexOpts.suffix
-
-  prefix = '' == prefix || null == prefix ? '' : prefix + '_'
-  suffix = '' == suffix || null == suffix ? '' : '_' + suffix
-
-  // TOOD: need ent.canon$({ external: true }) : foo/bar -> foo_bar
-  let infix = ent
-    .canon$({ string: true })
-    .replace(/-\//g, '')
-    .replace(/\//g, '_')
-
-  return prefix + infix + suffix
 }
 
-// Default options.
+// Client backed by the local filesystem, for offline dev and testing.
+function makeLocalClient(folder: string): StorageClient {
+  return {
+    async put(key, body) {
+      const full = Path.join(folder, key)
+      await Fsp.mkdir(Path.dirname(full), { recursive: true })
+      await Fsp.writeFile(full, body)
+    },
+
+    async get(key) {
+      const full = Path.join(folder, key)
+      try {
+        return await Fsp.readFile(full)
+      } catch (err: any) {
+        if ('ENOENT' === err.code) {
+          return null
+        }
+        throw err
+      }
+    },
+
+    async remove(key) {
+      const full = Path.join(folder, key)
+      try {
+        await Fsp.unlink(full)
+      } catch (err: any) {
+        if ('ENOENT' === err.code) {
+          return
+        }
+        throw err
+      }
+    },
+  }
+}
+
+async function destreamToBuffer(stream: any): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = []
+    stream.on('data', (chunk: Buffer) => chunks.push(chunk))
+    stream.on('error', reject)
+    stream.on('end', () => resolve(Buffer.concat(chunks)))
+  })
+}
+
 const defaults: Options = {
   debug: false,
+  prefix: Empty('seneca/r2/'),
+  suffix: Empty('.json'),
+  folder: Any(),
   map: Any(),
-  index: {
-    prefix: '',
-    suffix: '',
-    map: {},
-    exact: '',
-  },
+  shared: Skip({}),
 
-  // '' === name => do not inject
-  field: {
-    zone: { name: 'zone' },
-    base: { name: 'base' },
-    name: { name: 'name' },
-    vector: { name: 'vector' },
-  },
-
-  cmd: {
-    list: {
-      size: 11,
-    },
-  },
-
-  aws: Open({
-    region: 'us-east-1',
+  local: Open({
+    active: false,
+    folder: '',
+    suffixMode: Default('none', Exact('none', 'genid')),
   }),
 
-  opensearch: Open({
-    node: 'NODE-URL',
+  ent: Default({}, Child({ jsonl: Skip(String), bin: Skip(String) })),
+
+  r2: Open({
+    binding: Skip(Any()),
+    accountId: '',
+    accessKeyId: '',
+    secretAccessKey: '',
   }),
+
+  s3: Skip({}),
 }
 
-Object.assign(OpensearchStore, {
+Object.assign(CloudflareR2Store, {
   defaults,
-  utils: { resolveIndex },
+  utils: { makeR2Key, makeLocalClient, makeBindingClient },
 })
 
-export default OpensearchStore
+export default CloudflareR2Store
 
 if ('undefined' !== typeof module) {
-  module.exports = OpensearchStore
+  module.exports = CloudflareR2Store
 }
