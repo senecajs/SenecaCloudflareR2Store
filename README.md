@@ -1,152 +1,147 @@
 ![Seneca](http://senecajs.org/files/assets/seneca-logo.png)
 > A [Seneca.js][] data storage plugin.
 
-# SenecaOpensearchStore
+# @seneca/cloudflare-r2-store
+
 [![npm version][npm-badge]][npm-url]
-[![Build](https://github.com/senecajs/SenecaOpensearchStore/actions/workflows/build.yml/badge.svg)](https://github.com/senecajs/seneca-OpensearchStore/actions/workflows/build.yml)
-[![Dependency Status][david-badge]][david-url]
-[![Maintainability](https://api.codeclimate.com/v1/badges/e2cdcc5415161cb378b0/maintainability)](https://codeclimate.com/github/senecajs/SenecaOpensearchStore/maintainability)
-[![DeepScan grade](https://deepscan.io/api/teams/5016/projects/17225/branches/388415/badge/grade.svg)](https://deepscan.io/dashboard#view=project&tid=5016&pid=17225&bid=388415)
-[![Coveralls][BadgeCoveralls]][Coveralls]
-
-
+[![Build](https://github.com/senecajs/SenecaCloudflareR2Store/actions/workflows/build.yml/badge.svg)](https://github.com/senecajs/SenecaCloudflareR2Store/actions/workflows/build.yml)
 
 | ![Voxgig](https://www.voxgig.com/res/img/vgt01r.png) | This open source module is sponsored and supported by [Voxgig](https://www.voxgig.com). |
 |---|---|
 
-
 ## Description
 
-This module is a plugin for the Seneca framework. It provides an
-in-memory storage engine that provides a set of data storage action
-patterns. *Data does not persist betweens runs*.  This plugin is most
-useful for early development and unit testing. It also provides an
-example of a document-oriented storage plugin code-base.
+`@seneca/cloudflare-r2-store` is a [Seneca](http://senecajs.org) plugin that provides an entity data store backed by [Cloudflare R2](https://developers.cloudflare.com/r2/) object storage.
 
-The Seneca framework provides an [ActiveRecord-style data storage API][].
-Each supported database has a plugin, such as this one, that provides
-the underlying Seneca plugin actions required for data persistence.
-
-This plugin is loaded by default by the [seneca-entity][seneca-entity-url] plugin that also needs the [seneca-basic][seneca-basic-url] plugin to function properly.
-
-If you're using this module, and need help, you can:
-
-- Post a [github issue][],
-- Tweet to [@senecajs][],
-- Ask on the [Gitter][gitter-url].
-
-If you are new to Seneca in general, please take a look at [senecajs.org][]. We have everything from
-tutorials to sample apps to help get you up and running quickly.
-
-
-## Code examples
-
-For code samples, please see the [tests][OpensearchStore-tests] for this plugin.
-
-### Seneca compatibility
-Supports Seneca versions **2.x** and above
-
-
-### Supported functionality
-All Seneca data store supported functionality is implemented in [seneca-store-test](https://github.com/senecajs/seneca-store-test) as a test suite. The tests represent the store functionality specifications.
+R2 is an S3-compatible object storage service. Each entity is stored as a single object keyed by its canon and id. Because R2 is id-addressed, `list$` always returns `[]` — use [@seneca/cloudflare-d1-store](https://github.com/senecajs/SenecaCloudflareD1Store) if you need field-based queries.
 
 ## Install
 
 ```sh
-npm install seneca
-npm install SenecaOpensearchStore
-```
-
-You'll need the [seneca](http://github.com/senecajs/seneca) toolkit to use this module - it's just a plugin.
-
-## Quick Example
-
-```js
-var seneca = require('seneca')()
-
-seneca.use('basic')
-.use('entity')
-
-// Since OpensearchStore is a default plugin, it does not need to be
-// added with .use(). You can just go ahead and use it.
-seneca.ready(function () {
-  var apple = seneca.make$('fruit')
-  apple.name = 'Pink Lady'
-  apple.price = 0.99
-
-  apple.save$(function (err, apple) {
-    console.log("apple.id = " + apple.id)
-  })
-})
+npm install @seneca/cloudflare-r2-store
 ```
 
 ## Usage
-You don't use this module directly. It provides an underlying data storage engine for the Seneca entity API:
+
+### Worker binding mode
+
+Pass the `R2Bucket` binding from your Cloudflare Worker directly:
 
 ```js
-var entity = seneca.make$('typename')
-entity.someproperty = "something"
-entity.anotherproperty = 100
+import CloudflareR2Store from '@seneca/cloudflare-r2-store'
 
-entity.save$(function (err, entity) { ... })
-entity.load$({id: ... }, function (err, entity) { ... })
-entity.list$({property: ... }, function (err, entity) { ... })
-entity.remove$({id: ... }, function (err, entity) { ... })
+seneca
+  .use('entity')
+  .use(CloudflareR2Store, {
+    r2: { binding: env.MY_BUCKET },
+  })
 ```
 
-### Query Support
-The standard Seneca query format is supported:
+### S3-compatible API mode (Node / CI)
 
-- `.list$({f1:v1, f2:v2, ...})` implies pseudo-query `f1==v1 AND f2==v2, ...`.
+Use R2's S3-compatible API with your R2 access key credentials:
 
-- `.list$({f1:v1,...}, {sort$:{field1:1}})` means sort by f1, ascending.
-
-- `.list$({f1:v1,...}, {sort$:{field1:-1}})` means sort by f1, descending.
-
-- `.list$({f1:v1,...}, {limit$:10})` means only return 10 results.
-
-- `.list$({f1:v1,...}, {skip$:5})` means skip the first 5.
-
-- `.list$({f1:v1,...}, {fields$:['fd1','f2']})` means only return the listed fields.
-
-Note: you can use `sort$`, `limit$`, `skip$` and `fields$` together.
-
-### Native Driver
-This store is an in memory store and as such does not require the need of a native driver.
-
-## Contributing
-The [Senecajs org][] encourages open participation. If you feel you can help in any way, be it with
-documentation, examples, extra testing, or new features please get in touch.
-
-## Test
-To run tests, simply use npm:
-
-```sh
-npm run test
+```js
+seneca
+  .use('entity')
+  .use(CloudflareR2Store, {
+    shared: { Bucket: 'my-bucket' },
+    r2: {
+      accountId: 'your-account-id',
+      accessKeyId: 'your-access-key-id',
+      secretAccessKey: 'your-secret-access-key',
+    },
+  })
 ```
+
+### Local folder mode (dev / testing)
+
+```js
+seneca
+  .use('entity')
+  .use(CloudflareR2Store, {
+    local: { active: true, folder: '/tmp/r2-dev' },
+  })
+```
+
+## Options
+
+| Option | Default | Description |
+|---|---|---|
+| `prefix` | `'seneca/r2/'` | Key prefix prepended to every object key |
+| `suffix` | `'.json'` | Key suffix appended to every object key |
+| `folder` | — | If set, overrides prefix/suffix and uses `folder/<id>` as the key |
+| `shared` | `{}` | Merged into every S3 command (e.g. `{ Bucket: 'my-bucket' }`) |
+| `r2.binding` | — | `R2Bucket` Workers binding (takes priority over S3 client) |
+| `r2.accountId` | `''` | Cloudflare account ID (for S3-compatible API) |
+| `r2.accessKeyId` | `''` | R2 access key ID |
+| `r2.secretAccessKey` | `''` | R2 secret access key |
+| `local.active` | `false` | Use local filesystem instead of R2 |
+| `local.folder` | `''` | Local folder path when `local.active` is true |
+| `s3` | `{}` | Extra options merged into the `S3Client` constructor |
+
+## Object key scheme
+
+Keys follow the same convention as `@seneca/s3-store`:
+
+```
+<prefix><zone>/<base>/<name>/<id><suffix>
+```
+
+For example, `seneca.entity('foo/bar').save$()` with defaults produces:
+
+```
+seneca/r2/-/foo/bar/<id>.json
+```
+
+If `folder` is set, the key is simply `<folder>/<id><suffix>`.
+
+For JSONL or binary fields, the suffix is omitted and the field content is stored as the raw object body.
+
+## JSONL and binary fields
+
+To store a large array field efficiently as newline-delimited JSON:
+
+```js
+// save
+await seneca.entity('doc/chunk')
+  .data$({ chunks: [{ text: 'a' }, { text: 'b' }] })
+  .save$({ jsonl$: 'chunks' })
+
+// load
+const ent = await seneca.entity('doc/chunk')
+  .load$({ id, jsonl$: 'chunks' })
+// ent.chunks === [{ text: 'a' }, { text: 'b' }]
+```
+
+To store a raw binary buffer:
+
+```js
+await seneca.entity('doc/file')
+  .data$({ data: buffer })
+  .save$({ bin$: 'data' })
+
+const ent = await seneca.entity('doc/file')
+  .load$({ id, bin$: 'data' })
+// ent.data === Buffer
+```
+
+## Query limitation
+
+`list$` always returns `[]`. R2 is an object store addressed by key — there is no index to query against. Use [@seneca/cloudflare-d1-store](https://github.com/senecajs/SenecaCloudflareD1Store) for structured queries.
+
+## Native driver
+
+```js
+const { client } = seneca.export('CloudflareR2Store/native')()
+```
+
+Returns the active `StorageClient` instance (S3Client wrapper, R2 binding adapter, or local-folder client).
 
 ## License
-Copyright (c) 2015-2016, Richard Rodger and other contributors.
-Copyright (c) 2010-2014, Richard Rodger.
-Licensed under [MIT][].
 
-[MIT]: ./LICENSE
-[npm-badge]: https://badge.fury.io/js/SenecaOpensearchStore.svg
-[npm-url]: https://badge.fury.io/js/SenecaOpensearchStore
-[Senecajs org]: https://github.com/senecajs/
-[Seneca.js]: https://www.npmjs.com/package/seneca
-[@senecajs]: http://twitter.com/senecajs
-[senecajs.org]: http://senecajs.org/
-[travis-badge]: https://travis-ci.org/senecajs/SenecaOpensearchStore.svg
-[travis-url]: https://travis-ci.org/senecajs/SenecaOpensearchStore
-[gitter-badge]: https://badges.gitter.im/Join%20Chat.svg
-[gitter-url]: https://gitter.im/senecajs/seneca
-[github issue]: https://github.com/senecajs/SenecaOpensearchStore/issues
-[ActiveRecord-style data storage API]:http://senecajs.org/tutorials/understanding-data-entities.html
-[david-badge]: https://david-dm.org/senecajs/SenecaOpensearchStore.svg
-[david-url]: https://david-dm.org/senecajs/SenecaOpensearchStore
-[Coveralls]: https://coveralls.io/github/senecajs/SenecaOpensearchStore?branch=master
-[BadgeCoveralls]: https://coveralls.io/repos/github/senecajs/SenecaOpensearchStore/badge.svg?branch=master
-[seneca-basic-url]: https://github.com/senecajs/seneca-basic
-[seneca-entity-url]: https://github.com/senecajs/seneca-entity
-[OpensearchStore-tests]: https://github.com/senecajs/SenecaOpensearchStore/tree/master/test
+Copyright (c) 2024 the Seneca Project Contributors, MIT License.
+
+[Seneca.js]: http://senecajs.org
+[npm-badge]: https://img.shields.io/npm/v/@seneca/cloudflare-r2-store.svg
+[npm-url]: https://npmjs.com/package/@seneca/cloudflare-r2-store
