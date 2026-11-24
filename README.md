@@ -18,8 +18,10 @@ R2 is an S3-compatible object storage service. Each entity is stored as a single
 ## Install
 
 ```sh
-npm install @seneca/cloudflare-r2-store
+npm install seneca@^4 @seneca/entity @seneca/cloudflare-r2-store
 ```
+
+Needs Seneca 4, `@seneca/entity` 29 and Node.js 24 or later.
 
 ## Usage
 
@@ -31,7 +33,7 @@ Pass the `R2Bucket` binding from your Cloudflare Worker directly:
 import CloudflareR2Store from '@seneca/cloudflare-r2-store'
 
 seneca
-  .use('entity')
+  .use('@seneca/entity')
   .use(CloudflareR2Store, {
     r2: { binding: env.MY_BUCKET },
   })
@@ -43,7 +45,7 @@ Use R2's S3-compatible API with your R2 access key credentials:
 
 ```js
 seneca
-  .use('entity')
+  .use('@seneca/entity')
   .use(CloudflareR2Store, {
     shared: { Bucket: 'my-bucket' },
     r2: {
@@ -58,7 +60,7 @@ seneca
 
 ```js
 seneca
-  .use('entity')
+  .use('@seneca/entity')
   .use(CloudflareR2Store, {
     local: { active: true, folder: '/tmp/r2-dev' },
   })
@@ -78,7 +80,9 @@ seneca
 | `r2.secretAccessKey` | `''` | R2 secret access key |
 | `local.active` | `false` | Use local filesystem instead of R2 |
 | `local.folder` | `''` | Local folder path when `local.active` is true |
-| `s3` | `{}` | Extra options merged into the `S3Client` constructor |
+| `s3` | `{}` | Extra options merged into the `S3Client` constructor, such as `endpoint`, `region` and `forcePathStyle` for another S3-compatible server |
+| `ent` | `{}` | Per entity canon, the field stored as JSONL (`jsonl`) or as raw bytes (`bin`), e.g. `{ '-/doc/file': { bin: 'data' } }` |
+| `generate_id` | returns `undefined` | Function `(ent) => id` for new entities. When it returns `undefined`, the entity plugin generates the id |
 
 ## Object key scheme
 
@@ -129,6 +133,10 @@ const ent = await seneca.entity('doc/file')
 ## Query limitation
 
 `list$` always returns `[]`. R2 is an object store addressed by key — there is no index to query against. Use [@seneca/cloudflare-d1-store](https://github.com/senecajs/SenecaCloudflareD1Store) for structured queries.
+
+## Seneca compatibility
+
+Supports Seneca **4.x**, with `@seneca/entity` 29.x.
 
 ## Native driver
 

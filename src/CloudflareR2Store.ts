@@ -10,10 +10,6 @@ import {
   DeleteObjectCommand,
 } from '@aws-sdk/client-s3'
 
-import { Gubu } from 'gubu'
-
-const { Open, Any, Skip, Empty, Default, Exact, Child } = Gubu
-
 type R2Config = {
   accountId: string
   accessKeyId: string
@@ -27,7 +23,7 @@ type Options = {
   folder: any
   map?: any
   shared: any
-  generate_id?: (ent: any) => string
+  generate_id: (ent: any) => string | undefined
   local: any
   ent: any
   r2: any
@@ -48,8 +44,13 @@ function CloudflareR2Store(this: any, options: Options) {
   const seneca: any = this
 
   const init = seneca.export('entity/init')
-  const generate_id: (ent: any) => string =
-    options.generate_id || seneca.export('entity/generate_id')
+  const entity_generate_id: (ent: any) => string =
+    seneca.export('entity/generate_id')
+
+  // The default generate_id option returns undefined: use the generator of
+  // the entity plugin.
+  const generate_id = (ent: any): string =>
+    options.generate_id(ent) ?? entity_generate_id(ent)
 
   let desc: any = 'CloudflareR2Store'
   let client: StorageClient
@@ -182,7 +183,7 @@ function CloudflareR2Store(this: any, options: Options) {
 
   desc = meta.desc
 
-  seneca.add({ init: store.name, tag: meta.tag }, function (this: any, _msg: any, reply: any) {
+  seneca.init(function (this: any, reply: any) {
     if (options.r2?.binding) {
       client = makeBindingClient(options.r2.binding)
     } else if (options.local?.active) {
@@ -336,31 +337,41 @@ async function destreamToBuffer(stream: any): Promise<Buffer> {
   })
 }
 
-const defaults: Options = {
+// The option shape is built with the builders that Seneca passes in
+// `valid`. Seneca 4 rejects defaults built with Gubu.
+const defaults = ({ valid }: { valid: any }) => ({
   debug: false,
-  prefix: Empty('seneca/r2/'),
-  suffix: Empty('.json'),
-  folder: Any(),
-  map: Any(),
-  shared: Skip({}),
+  prefix: valid.Empty('seneca/r2/'),
+  suffix: valid.Empty('.json'),
+  folder: valid.Any(),
+  map: valid.Any(),
+  shared: valid.Skip({}),
 
-  local: Open({
+  // Returns undefined to use the id generator of the entity plugin.
+  generate_id: function generate_id(_ent: any): string | undefined {
+    return undefined
+  },
+
+  local: valid.Open({
     active: false,
     folder: '',
-    suffixMode: Default('none', Exact('none', 'genid')),
+    suffixMode: valid.Default('none', valid.Exact('none', 'genid')),
   }),
 
-  ent: Default({}, Child({ jsonl: Skip(String), bin: Skip(String) })),
+  ent: valid.Default(
+    {},
+    valid.Child({ jsonl: valid.Skip(String), bin: valid.Skip(String) }),
+  ),
 
-  r2: Open({
-    binding: Skip(Any()),
+  r2: valid.Open({
+    binding: valid.Skip(valid.Any()),
     accountId: '',
     accessKeyId: '',
     secretAccessKey: '',
   }),
 
-  s3: Skip({}),
-}
+  s3: valid.Skip({}),
+})
 
 Object.assign(CloudflareR2Store, {
   defaults,
